@@ -1,0 +1,21 @@
+sources:
+  - id: fi_news_rss_a
+    kind: rss
+    enabled: true
+    config:
+      feed_url: https://example.com/fi/rss
+
+  - id: fi_research_api
+    kind: api
+    enabled: false
+    config:
+      endpoint: https://api.example.com/fixed-income/reports
+      auth_ref: vault://cova/fi-research-api-token
+
+  - id: fi_internal_db
+    kind: database
+    enabled: false
+    config:
+      dsn_ref: vault://cova/fi-db-dsn
+      query: SELECT * FROM fi_daily_view WHERE trade_date = :date
+

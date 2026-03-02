@@ -1,0 +1,21 @@
+sources:
+  - id: sample_web
+    kind: website
+    enabled: false
+    config:
+      base_url: https://example.com
+      crawl_interval_minutes: 30
+
+  - id: sample_api
+    kind: api
+    enabled: false
+    config:
+      endpoint: https://api.example.com/v1/data
+      auth_ref: vault://example/api-token
+
+  - id: sample_rss
+    kind: rss
+    enabled: false
+    config:
+      feed_url: https://example.com/feed.xml
+

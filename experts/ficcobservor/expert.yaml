@@ -1,0 +1,34 @@
+api_version: cova/v1
+kind: ExpertDefinition
+
+metadata:
+  expert_id: fi_cn_primary
+  expert_name: FICC Observor CN Primary
+  expert_type: fixed_income
+  version: 0.1.0
+  owner: team-cova
+  description: Fixed income expert focused on CN market daily overview.
+
+spec:
+  enabled: true
+  capabilities:
+    - daily_brief
+    - query
+  routing:
+    priority: 10
+    tags:
+      - fixed_income
+      - cn
+  runtime:
+    mode: local
+    entrypoint: ./main
+    timeout_seconds: 300
+    max_concurrency: 4
+  inputs:
+    accepts:
+      - text
+      - structured_context
+  outputs:
+    result_schema: ./schemas/result.schema.json
+    evidence_mode: references
+

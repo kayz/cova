@@ -1,0 +1,33 @@
+api_version: cova/v1
+kind: ExpertDefinition
+
+metadata:
+  expert_id: template_expert
+  expert_name: Template Expert
+  expert_type: generic
+  version: 0.1.0
+  owner: team-cova
+  description: Base template for building a new COVA expert.
+
+spec:
+  enabled: false
+  capabilities:
+    - daily_brief
+    - query
+  routing:
+    priority: 100
+    tags:
+      - default
+  runtime:
+    mode: local
+    entrypoint: ./main
+    timeout_seconds: 120
+    max_concurrency: 2
+  inputs:
+    accepts:
+      - text
+      - structured_context
+  outputs:
+    result_schema: ./schemas/result.schema.json
+    evidence_mode: references
+

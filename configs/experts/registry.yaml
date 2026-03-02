@@ -1,0 +1,8 @@
+api_version: cova/v1
+kind: ExpertRegistry
+
+experts:
+  - expert_id: fi_cn_primary
+    config_path: ../../experts/ficcobservor/expert.yaml
+    enabled: true
+
