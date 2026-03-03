@@ -1,15 +1,20 @@
 # COVA Test & Checkpoints
 
-> Baseline Date: 2026-03-02
+> Baseline Date: 2026-03-03
 
 本文档定义每个阶段完成后的验收方法，避免“功能看起来有了，但不可运营”。
 
-## Checkpoint A: 边界冻结验收
+## 执行状态
+
+- A-F 阶段已完成并执行回归测试：`go test ./...`
+- 当前检查点文档保留为后续生产化阶段验收模板
+
+## Checkpoint A: Assistant API 与文档一致性
 
 验收项：
 
-1. `VISION`、`Architecture`、双 API 文档已更新且互相一致。
-2. 状态机、错误码、版本策略在文档中唯一且无冲突定义。
+1. 文档接口路径与 OpenAPI 一致（`/v1/assistant/*`）。
+2. README、Assistant API 文档、OpenAPI 三者字段语义一致。
 
 执行方法：
 
@@ -25,7 +30,7 @@
 
 验收项：
 
-1. API 请求都能解析并携带 `tenant_id/project_id` 上下文。
+1. API 请求都能解析并携带 `X-Tenant-Id/X-Project-Id`。
 2. 跨租户访问被拒绝并记录审计日志。
 
 执行方法：
@@ -42,7 +47,7 @@
 
 验收项：
 
-1. Conformance 套件可自动执行。
+1. `registry` conformance 校验可执行（capabilities/runtime/version/schema）。
 2. 专家未通过测试不可发布到 active。
 
 执行方法：
@@ -59,8 +64,8 @@
 
 验收项：
 
-1. 任务状态在异常重启后可恢复。
-2. 重试、取消、超时、过期语义正确。
+1. 任务状态在异常重启后可恢复（当前 JSON 持久化基线）。
+2. `cancel/replay/retry/expired` 语义正确。
 3. webhook 重试与去重生效。
 
 执行方法：
@@ -78,9 +83,9 @@
 
 验收项：
 
-1. trace 覆盖入口到专家执行到回调全链路。
-2. 可按租户查看成本与成功率。
-3. SLO 告警可触发并可追溯。
+1. `gateway/orchestrator/worker` 提供 `metrics/healthz`。
+2. 可按租户查看任务状态与重试聚合指标。
+3. 后续接入 OTel 后补充全链路 trace 验收。
 
 执行方法：
 
@@ -97,7 +102,7 @@
 验收项：
 
 1. `coco` 与 `openclaw` 均可接入 Assistant API。
-2. 两端使用同一协议，无客户端定制字段污染核心接口。
+2. 两端使用同一协议，无客户端特有字段污染核心接口。
 
 执行方法：
 
@@ -109,7 +114,7 @@
 - 双客户端关键任务通过率 >= 99%
 - 适配层代码变更不影响平台核心协议
 
-## 最低自动化检查清单
+## 最低自动化检查清单（持续执行）
 
 每次阶段结束至少执行：
 

@@ -1,4 +1,7 @@
-# COVA API Contract (v1 Draft)
+# COVA API Contract (Legacy Draft)
+
+> 注意：本文件为历史统一接口草案，包含早期路径（`/v1/jobs/*`）。  
+> 当前代码实现请以 [openapi.v1.yaml](./openapi.v1.yaml) 和 [api-assistant.md](./api-assistant.md) 为准。
 
 ## 1. 设计目标
 

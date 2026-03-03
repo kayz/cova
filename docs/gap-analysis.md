@@ -1,49 +1,44 @@
-# COVA Gap Analysis (As-Is vs Target)
+# COVA Gap Analysis (After 2026-03-03 Delivery)
 
-> Baseline Date: 2026-03-02
+> Baseline Date: 2026-03-03
 
 ## 1. 总览
 
-当前仓库已经具备 Phase 1 骨架（统一入口、异步任务、基础 webhook、专家注册），但距离“企业级专家生产力平台”仍有关键差距，特别在多租户治理、双 API 契约、生产可靠性与专家准入体系。
+相较 2026-03-02 的初始评估，当前代码已完成文档中 Phase A-F 的核心骨架落地：双边界文档、Assistant API、多租户、专家准入校验、状态机增强、基础观测、客户端适配层。
 
-## 2. 差异矩阵
+当前主要差距已从“平台边界未落地”转为“生产级能力深化”。
 
-| 领域 | 当前状态（As-Is） | 目标状态（Target） | Gap 等级 |
+## 2. 差异矩阵（当前）
+
+| 领域 | 当前实现状态 | 目标状态 | Gap 等级 |
 | --- | --- | --- | --- |
-| 平台边界 | 以统一 API 草案为主，助理/专家边界未完全拆分 | 明确 Assistant API + Expert Runtime API 双边界 | P0 |
-| 多租户 | 文档提及预留，代码未形成完整租户模型 | token claim 驱动的 tenant/project 强隔离 | P0 |
-| 状态机完整性 | 已有 queued/running/succeeded/failed 主路径 | 完整支持 canceled/expired + 恢复与补偿 | P0 |
-| 任务持久化 | JSON 文件存储，适合开发验证 | 生产级 DB + durable queue + DLQ | P0 |
-| 专家准入 | 有 `expert.yaml` 模板与 registry | 可执行 Conformance 规范与准入门禁 | P0 |
-| 安全治理 | 网关鉴权、回调签名基础可用 | 细粒度 scope、租户策略、密钥治理闭环 | P1 |
-| 可观测性 | 基础 metrics + 日志 | OTel tracing + 成本指标 + SLO 告警 | P1 |
-| 版本治理 | OpenAPI 与生成代码已建立 | API 版本策略 + 专家版本发布回滚流程 | P1 |
-| 客户端生态 | 当前偏向单调用模式 | `coco/openclaw/第三方` 多客户端适配层 | P1 |
-| 质量保障 | 单元测试较完整 | 合约测试、回归评测、混沌测试 | P1 |
+| Assistant API | 已实现 `/v1/assistant/*`（含 cancel/replay） | 继续稳定演进 v1 | P1 |
+| 多租户 | Header 强校验 + 任务隔离 + token 绑定注入 | 接入 OIDC/JWT claim 自动映射与策略中心 | P1 |
+| 状态机 | `queued/running/succeeded/failed/canceled/expired` 已落地 | 引入更细粒度步骤状态与补偿策略 | P1 |
+| 重试与 DLQ | 已有 max attempts + DLQ 持久化字段 | 接入 durable queue 与独立 DLQ 消费治理 | P0 |
+| 专家准入 | `registry` 已做 conformance 基础校验 | 完整准入流水线（CI 门禁 + 评分 + 审批） | P1 |
+| 观测 | `metrics/healthz` + 租户维度聚合 | OTel tracing、统一日志采集、告警平台 | P0 |
+| 存储与队列 | 仍以 JSON 文件状态为主 | Postgres + durable queue（Redis/NATS/Kafka） | P0 |
+| Expert Runtime API | 文档已定义 | 独立运行时 API 与服务端实现 | P0 |
+| 客户端生态 | 已有 coco/openclaw SDK 适配层 | 增加接入指南、示例、契约测试套件 | P1 |
+| 成本治理 | 估算 token 指标 | 精确 token/cost 计量与预算控制 | P1 |
 
-## 3. 关键风险
+## 3. 当前关键风险
 
-1. 没有多租户强隔离时，越早接外部客户端，越容易出现权限边界事故。  
-2. 专家无准入门禁时，平台可用性会被“个别不稳定专家”拉低。  
-3. 队列与状态存储未升级前，异常恢复能力有限。  
-4. Assistant/Expert API 不分离会导致后续协议演进成本增大。
+1. 生产数据与任务持久化尚未迁移到数据库与 durable queue。  
+2. Expert Runtime API 仍是设计文档层，未形成独立服务契约执行。  
+3. 观测深度仍不足以支撑复杂生产故障定位（缺 end-to-end trace）。
 
-## 4. 优先级建议
+## 4. 下一步优先级（建议）
 
-### P0（先做）
+### P0（优先）
 
-- 落地双 API 契约并冻结 v1 字段语义
-- 落地多租户身份与授权模型
-- 落地专家 conformance 门禁
-- 落地生产级状态与队列
+- 持久化与队列生产化（DB + durable queue + DLQ 消费）
+- OTel tracing 与告警接入
+- Expert Runtime API 最小可用实现
 
 ### P1（随后）
 
-- 完成成本与质量治理看板
-- 完成专家版本发布/回滚机制
-- 完成多客户端适配标准
-
-### P2（后续）
-
-- 专家市场化目录与评分
-- 自动化策略调度与容量优化
+- 租户策略中心（配额、权限、预算）
+- Conformance 流水线自动化
+- 精细化成本治理与报表

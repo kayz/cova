@@ -1,9 +1,15 @@
-# COVA Expert Runtime API (v1 Draft)
+# COVA Expert Runtime API (v1 Draft, Not Implemented Yet)
 
 ## 1. 适用对象
 
 本 API 面向“被 COVA 管理的专家 Agent”。  
 专家可以是纯 Agent，也可以是 Agent + 工作流代码 + 私有数据源的组合服务。
+
+状态说明：
+
+- 本文档定义平台目标接口与准入规范。
+- 当前仓库尚未提供独立 `runtime/v1/*` HTTP 服务端实现。
+- 当前代码中的专家执行路径为 orchestrator 内置执行器 + mock worker。
 
 ## 2. 准入与合规要求（Conformance）
 

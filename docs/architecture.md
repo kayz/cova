@@ -48,6 +48,11 @@ Expert Agents + Tools + Private Data
 用于专家注册、能力声明、任务执行、进度事件、结果回传与健康检查。  
 详见 [api-expert.md](./api-expert.md)。
 
+当前状态：
+
+- Assistant API 已实现并可用。
+- Expert Runtime API 目前为目标契约，尚未独立服务化实现。
+
 ## 4. 多租户模型
 
 ### 4.1 资源层级
