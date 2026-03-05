@@ -4,6 +4,5 @@
 
 - `gateway/`：对外 API 服务
 - `orchestrator/`：任务编排与状态管理
-- `worker/`：专家执行器
-- `ingestion/`：多源数据采集与清洗任务
-
+- `expert-runtime/`：专家运行时 API（`/runtime/v1/*`）
+- `worker/`：兼容旧路径的 mock 专家执行入口

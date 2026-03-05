@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"cova/internal/api/openapi"
 	deliverywebhook "cova/internal/delivery/webhook"
+	"cova/internal/observability/logjson"
 	"cova/internal/registry"
 	"cova/internal/storage/jobstore"
 	workerexecutor "cova/internal/worker/executor"
@@ -32,6 +34,10 @@ const (
 
 type webhookDispatcher interface {
 	DeliverJobCompleted(ctx context.Context, callback apiv1.CallbackConfig, payload deliverywebhook.JobCompletedData) error
+}
+
+type expertEventVerifier interface {
+	Verify(headers http.Header, body []byte) (deliverywebhook.Event, error)
 }
 
 type webhookDeliveryReader interface {
@@ -62,6 +68,12 @@ func WithWebhookDeliveryReader(reader webhookDeliveryReader) Option {
 	}
 }
 
+func WithExpertEventVerifier(verifier expertEventVerifier) Option {
+	return func(s *Server) {
+		s.eventVerifier = verifier
+	}
+}
+
 func WithJobStore(store jobstore.Store) Option {
 	return func(s *Server) {
 		if store != nil {
@@ -82,6 +94,14 @@ func WithQueueSize(size int) Option {
 	return func(s *Server) {
 		if size > 0 {
 			s.queueSize = size
+		}
+	}
+}
+
+func WithQueue(queue jobQueue) Option {
+	return func(s *Server) {
+		if queue != nil {
+			s.queue = queue
 		}
 	}
 }
@@ -111,18 +131,19 @@ type Server struct {
 	dlq     map[string]jobstore.DeadLetterEntry
 	nextID  uint64
 
-	now          func() time.Time
-	webhook      webhookDispatcher
-	deliveryRead webhookDeliveryReader
-	stateStore   jobstore.Store
-	executor     workerexecutor.Executor
+	now           func() time.Time
+	webhook       webhookDispatcher
+	eventVerifier expertEventVerifier
+	deliveryRead  webhookDeliveryReader
+	stateStore    jobstore.Store
+	executor      workerexecutor.Executor
 
-	queueSize int
+	queueSize   int
 	maxAttempts int
 	jobTTL      time.Duration
-	queue     chan string
-	workerCtx context.Context
-	cancel    context.CancelFunc
+	queue       jobQueue
+	workerCtx   context.Context
+	cancel      context.CancelFunc
 
 	httpHandler http.Handler
 }
@@ -215,10 +236,12 @@ func NewServer(snapshot *registry.Snapshot, opts ...Option) *Server {
 		opt(s)
 	}
 
-	s.queue = make(chan string, s.queueSize)
+	if s.queue == nil {
+		s.queue = newMemoryQueue(s.queueSize)
+	}
 	s.workerCtx, s.cancel = context.WithCancel(context.Background())
 	if err := s.loadState(); err != nil {
-		log.Printf("load orchestrator state failed: %v", err)
+		logjson.Emit("error", "load orchestrator state failed", map[string]any{"error": err.Error()})
 	}
 
 	go s.workerLoop()
@@ -230,6 +253,9 @@ func NewServer(snapshot *registry.Snapshot, opts ...Option) *Server {
 func (s *Server) Close() {
 	if s.cancel != nil {
 		s.cancel()
+	}
+	if s.queue != nil {
+		_ = s.queue.Close()
 	}
 }
 
@@ -243,7 +269,7 @@ func (s *Server) MetricsSnapshot() MetricsSnapshot {
 
 	out := MetricsSnapshot{
 		TimestampUTC: s.now().UTC().Format(time.RFC3339Nano),
-		QueueDepth:   len(s.queue),
+		QueueDepth:   s.queue.Depth(context.Background()),
 		JobsTotal:    len(s.jobs),
 		DLQTotal:     len(s.dlq),
 		ByStatus: map[string]int{
@@ -307,12 +333,126 @@ func (s *Server) HealthHandler() http.Handler {
 		}
 		payload := map[string]any{
 			"status":      "ok",
-			"queue_depth": len(s.queue),
+			"queue_depth": s.queue.Depth(context.Background()),
 			"jobs_total":  len(s.jobs),
 			"timestamp":   s.now().UTC().Format(time.RFC3339Nano),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(payload)
+	})
+}
+
+type expertTaskEventData struct {
+	TaskID  string              `json:"task_id"`
+	JobID   string              `json:"job_id"`
+	TraceID string              `json:"trace_id,omitempty"`
+	Status  string              `json:"status"`
+	Result  *apiv1.ExpertResult `json:"result,omitempty"`
+	Error   *string             `json:"error,omitempty"`
+}
+
+func (s *Server) ExpertEventsHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		defer r.Body.Close()
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"type":   "https://api.cova.example.com/errors/invalid-request",
+				"title":  "Invalid request",
+				"status": http.StatusBadRequest,
+				"detail": "invalid event payload",
+			})
+			return
+		}
+
+		event, err := s.parseExpertEvent(r, raw)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"type":   "https://api.cova.example.com/errors/unauthorized",
+				"title":  "Unauthorized",
+				"status": http.StatusUnauthorized,
+				"detail": err.Error(),
+			})
+			return
+		}
+		data, err := parseExpertEventData(event.Data)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"type":   "https://api.cova.example.com/errors/invalid-input",
+				"title":  "Invalid input",
+				"status": http.StatusBadRequest,
+				"detail": err.Error(),
+			})
+			return
+		}
+
+		var callback *apiv1.CallbackConfig
+		s.mu.Lock()
+		current, ok := s.jobs[data.JobID]
+		if !ok {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"type":   "https://api.cova.example.com/errors/not-found",
+				"title":  "Not found",
+				"status": http.StatusNotFound,
+				"detail": "job not found",
+			})
+			return
+		}
+		if current.Status != statusSucceeded && current.Status != statusFailed && current.Status != statusCanceled && current.Status != statusExpired {
+			now := s.now().UTC()
+			switch strings.TrimSpace(data.Status) {
+			case statusSucceeded:
+				current.Status = statusSucceeded
+				current.Progress = 100
+				current.Result = data.Result
+				current.LastError = nil
+				callback = cloneCallbackConfig(current.Callback)
+				delete(s.dlq, current.ID)
+			case statusFailed:
+				current.Status = statusFailed
+				current.Progress = 100
+				current.LastError = data.Error
+				s.dlq[current.ID] = jobstore.DeadLetterEntry{
+					JobID:       current.ID,
+					TenantID:    current.TenantID,
+					ProjectID:   current.ProjectID,
+					Reason:      "runtime_failed",
+					Attempts:    current.Attempt,
+					FailedAt:    now,
+					LastError:   ptrValue(data.Error),
+					FinalStatus: current.Status,
+				}
+			case statusCanceled:
+				current.Status = statusCanceled
+				current.Progress = 100
+			default:
+				s.mu.Unlock()
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"type":   "https://api.cova.example.com/errors/invalid-input",
+					"title":  "Invalid input",
+					"status": http.StatusBadRequest,
+					"detail": "unsupported event status",
+				})
+				return
+			}
+			current.UpdatedAt = now
+			s.persistLocked()
+		}
+		s.mu.Unlock()
+
+		if callback != nil && strings.TrimSpace(callback.Url) != "" {
+			go s.dispatchJobCompletedWebhook(data.JobID, *callback)
+		}
+
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "accepted",
+			"job_id": data.JobID,
+		})
 	})
 }
 
@@ -758,8 +898,22 @@ func (s *Server) workerLoop() {
 		select {
 		case <-s.workerCtx.Done():
 			return
-		case jobID := <-s.queue:
-			s.processBriefJob(jobID)
+		default:
+		}
+		item, err := s.queue.Dequeue(s.workerCtx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
+			logjson.Emit("error", "queue dequeue failed", map[string]any{"error": err.Error()})
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		s.processBriefJob(item.ID)
+		if item.Ack != nil {
+			if err := item.Ack(s.workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logjson.Emit("error", "queue ack failed", map[string]any{"job_id": item.ID, "error": err.Error()})
+			}
 		}
 	}
 }
@@ -787,10 +941,13 @@ func (s *Server) processBriefJob(jobID string) {
 	s.persistLocked()
 	input := workerexecutor.BriefInput{
 		JobID:      current.ID,
+		TenantID:   current.TenantID,
+		ProjectID:  current.ProjectID,
 		ExpertID:   current.ExpertID,
 		ExpertName: current.ExpertName,
 		ExpertType: current.ExpertType,
 		Date:       current.Date,
+		TraceID:    current.ID,
 	}
 	s.mu.Unlock()
 
@@ -798,6 +955,19 @@ func (s *Server) processBriefJob(jobID string) {
 	result, err := s.executor.ExecuteBrief(ctx, input)
 	cancel()
 	if err != nil {
+		if errors.Is(err, workerexecutor.ErrAsyncAccepted) {
+			s.mu.Lock()
+			if current, ok := s.jobs[jobID]; ok {
+				if current.Status != statusCanceled && !isExpired(current, s.now().UTC()) {
+					current.Status = statusRunning
+					current.Progress = 60
+					current.UpdatedAt = s.now().UTC()
+					s.persistLocked()
+				}
+			}
+			s.mu.Unlock()
+			return
+		}
 		s.mu.Lock()
 		if current, ok := s.jobs[jobID]; ok {
 			now := s.now().UTC()
@@ -822,7 +992,12 @@ func (s *Server) processBriefJob(jobID string) {
 				s.persistLocked()
 				s.mu.Unlock()
 				s.enqueue(jobID)
-				log.Printf("brief execution retry scheduled: job_id=%s attempt=%d/%d err=%v", jobID, current.Attempt, current.MaxAttempts, err)
+				logjson.Emit("warn", "brief execution retry scheduled", map[string]any{
+					"job_id":       jobID,
+					"attempt":      current.Attempt,
+					"max_attempts": current.MaxAttempts,
+					"error":        err.Error(),
+				})
 				return
 			}
 			current.Status = statusFailed
@@ -840,7 +1015,7 @@ func (s *Server) processBriefJob(jobID string) {
 			s.persistLocked()
 		}
 		s.mu.Unlock()
-		log.Printf("brief execution failed: job_id=%s err=%v", jobID, err)
+		logjson.Emit("error", "brief execution failed", map[string]any{"job_id": jobID, "error": err.Error()})
 		return
 	}
 
@@ -885,21 +1060,19 @@ func (s *Server) dispatchJobCompletedWebhook(jobID string, callback apiv1.Callba
 		ResultURL: "/v1/assistant/jobs/" + jobID + "/result",
 	})
 	if err != nil {
-		log.Printf("webhook delivery failed: job_id=%s callback_url=%s err=%v", jobID, callback.Url, err)
+		logjson.Emit("error", "webhook delivery failed", map[string]any{
+			"job_id":       jobID,
+			"callback_url": callback.Url,
+			"error":        err.Error(),
+		})
 	}
 }
 
 func (s *Server) enqueue(jobID string) {
-	select {
-	case s.queue <- jobID:
-	default:
-		go func() {
-			select {
-			case <-s.workerCtx.Done():
-				return
-			case s.queue <- jobID:
-			}
-		}()
+	ctx, cancel := context.WithTimeout(s.workerCtx, 3*time.Second)
+	defer cancel()
+	if err := s.queue.Enqueue(ctx, jobID); err != nil && !errors.Is(err, context.Canceled) {
+		logjson.Emit("error", "queue enqueue failed", map[string]any{"job_id": jobID, "error": err.Error()})
 	}
 }
 
@@ -1039,8 +1212,53 @@ func (s *Server) persistLocked() {
 	}
 
 	if err := s.stateStore.Save(context.Background(), state); err != nil {
-		log.Printf("persist orchestrator state failed: %v", err)
+		logjson.Emit("error", "persist orchestrator state failed", map[string]any{"error": err.Error()})
 	}
+}
+
+func (s *Server) parseExpertEvent(r *http.Request, raw []byte) (deliverywebhook.Event, error) {
+	if s.eventVerifier != nil {
+		return s.eventVerifier.Verify(r.Header, raw)
+	}
+	var event deliverywebhook.Event
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return deliverywebhook.Event{}, fmt.Errorf("invalid event payload: %w", err)
+	}
+	return event, nil
+}
+
+func parseExpertEventData(raw any) (expertTaskEventData, error) {
+	switch v := raw.(type) {
+	case expertTaskEventData:
+		if strings.TrimSpace(v.JobID) == "" {
+			return expertTaskEventData{}, errors.New("event data missing job_id")
+		}
+		return v, nil
+	case *expertTaskEventData:
+		if v == nil || strings.TrimSpace(v.JobID) == "" {
+			return expertTaskEventData{}, errors.New("event data missing job_id")
+		}
+		return *v, nil
+	default:
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return expertTaskEventData{}, errors.New("event data is invalid")
+		}
+		var out expertTaskEventData
+		if err := json.Unmarshal(encoded, &out); err != nil {
+			return expertTaskEventData{}, errors.New("event data is invalid")
+		}
+		if strings.TrimSpace(out.JobID) == "" {
+			return expertTaskEventData{}, errors.New("event data missing job_id")
+		}
+		return out, nil
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func problem(instance, requestID, code, title, detail string) apiv1.Problem {

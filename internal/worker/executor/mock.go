@@ -15,10 +15,13 @@ type Executor interface {
 
 type BriefInput struct {
 	JobID      string
+	TenantID   string
+	ProjectID  string
 	ExpertID   string
 	ExpertName string
 	ExpertType string
 	Date       string
+	TraceID    string
 }
 
 type mockConfig struct {

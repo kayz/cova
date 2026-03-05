@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +25,8 @@ const (
 
 // Config controls gateway middleware behaviors.
 type Config struct {
-	AuthEnabled bool
-	AuthTokens  []string
+	AuthEnabled  bool
+	AuthTokens   []string
 	AuthBindings []AuthBinding
 
 	RateLimitEnabled bool
@@ -128,6 +130,7 @@ func NewHandler(next http.Handler, cfg Config) (*Middleware, error) {
 
 func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.injectRequestID(r)
+	m.injectTraceparent(r)
 
 	startedAt := m.cfg.Now().UTC()
 	clientIP := clientKey(r)
@@ -221,6 +224,20 @@ func (m *Middleware) injectRequestID(r *http.Request) {
 	seq := atomic.AddUint64(&m.seq, 1)
 	id := "gw_" + m.cfg.Now().UTC().Format("20060102T150405.000000000") + "_" + strconv.FormatUint(seq, 10)
 	r.Header.Set("X-Request-Id", id)
+}
+
+func (m *Middleware) injectTraceparent(r *http.Request) {
+	if strings.TrimSpace(r.Header.Get("traceparent")) != "" {
+		return
+	}
+	requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+	if requestID == "" {
+		requestID = "req_" + strconv.FormatInt(m.cfg.Now().UTC().UnixNano(), 10)
+	}
+	sum := sha256.Sum256([]byte(requestID))
+	traceID := hex.EncodeToString(sum[:16])
+	spanID := hex.EncodeToString(sum[16:24])
+	r.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
 }
 
 func (m *Middleware) checkAuth(r *http.Request) (authPrincipal, error) {

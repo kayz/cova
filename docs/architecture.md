@@ -51,7 +51,7 @@ Expert Agents + Tools + Private Data
 当前状态：
 
 - Assistant API 已实现并可用。
-- Expert Runtime API 目前为目标契约，尚未独立服务化实现。
+- Expert Runtime API 已提供独立服务实现（`cmd/expert-runtime`），可用 mock adapter 承载首发版本。
 
 ## 4. 多租户模型
 

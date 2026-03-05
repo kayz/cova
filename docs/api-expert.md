@@ -1,15 +1,15 @@
-# COVA Expert Runtime API (v1 Draft, Not Implemented Yet)
+# COVA Expert Runtime API (v1, Implemented)
 
 ## 1. 适用对象
 
 本 API 面向“被 COVA 管理的专家 Agent”。  
 专家可以是纯 Agent，也可以是 Agent + 工作流代码 + 私有数据源的组合服务。
 
-状态说明：
+状态说明（2026-03-05）：
 
-- 本文档定义平台目标接口与准入规范。
-- 当前仓库尚未提供独立 `runtime/v1/*` HTTP 服务端实现。
-- 当前代码中的专家执行路径为 orchestrator 内置执行器 + mock worker。
+- 已提供独立 `cmd/expert-runtime` 服务端实现。
+- orchestrator 已支持通过 `-runtime-url` 对接 Runtime API。
+- Expert 异步回传事件入口：`POST /v1/expert/events`（支持验签）。
 
 ## 2. 准入与合规要求（Conformance）
 
@@ -110,6 +110,11 @@
 }
 ```
 
+说明：
+
+- 可通过 `X-COVA-Execution-Mode: async` 强制异步受理。
+- `cmd/expert-runtime` 启动参数 `-async-default=true` 时默认异步。
+
 ### 4.4 取消任务
 
 `POST /runtime/v1/tasks/{task_id}/cancel`
@@ -157,6 +162,11 @@
 - `X-COVA-Timestamp`
 - `X-COVA-Signature: sha256=<hex>`
 
+说明：
+
+- orchestrator 设置 `-expert-event-signing-secret` 后将强制验签。
+- runtime 设置 `-event-signing-secret` 后会自动附带签名头。
+
 ## 6. 错误码约定
 
 - `invalid-input`
@@ -181,3 +191,27 @@
 - 专家 runtime 合约采用语义化版本。
 - 新增字段向后兼容。
 - 破坏性变更通过 `/runtime/v2` 引入。
+
+## 9. 启动示例
+
+### 9.1 启动 Runtime
+
+```bash
+go run ./cmd/expert-runtime \
+  -addr :8082 \
+  -auth-enabled=true \
+  -auth-token runtime-token-prod \
+  -async-default=true \
+  -event-callback-url http://127.0.0.1:8081/v1/expert/events \
+  -event-signing-secret runtime-event-secret-prod
+```
+
+### 9.2 启动 Orchestrator 对接 Runtime
+
+```bash
+go run ./cmd/orchestrator \
+  -runtime-url http://127.0.0.1:8082 \
+  -runtime-auth-token runtime-token-prod \
+  -runtime-async=true \
+  -expert-event-signing-secret runtime-event-secret-prod
+```

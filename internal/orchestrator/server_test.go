@@ -3,6 +3,9 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +24,14 @@ type flakyExecutor struct {
 	mu        sync.Mutex
 	failUntil int
 	calls     int
+}
+
+type acceptedExecutor struct{}
+
+func (acceptedExecutor) ExecuteBrief(ctx context.Context, input workerexecutor.BriefInput) (apiv1.ExpertResult, error) {
+	_ = ctx
+	_ = input
+	return apiv1.ExpertResult{}, workerexecutor.ErrAsyncAccepted
 }
 
 func (e *flakyExecutor) ExecuteBrief(ctx context.Context, input workerexecutor.BriefInput) (apiv1.ExpertResult, error) {
@@ -341,6 +352,145 @@ func TestMetricsAndHealthHandlers(t *testing.T) {
 	}
 }
 
+func TestExpertEventCompletesAsyncAcceptedJob(t *testing.T) {
+	server := NewServer(
+		buildSnapshot(),
+		WithExecutor(acceptedExecutor{}),
+	)
+	t.Cleanup(server.Close)
+
+	mux := http.NewServeMux()
+	mux.Handle("/v1/expert/events", server.ExpertEventsHandler())
+	mux.Handle("/", server)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	submit := doJSON(t, http.MethodPost, ts.URL+"/v1/assistant/jobs", map[string]any{
+		"expert_id": "fi_cn_primary",
+		"date":      "2026-03-05",
+	}, nil)
+	if submit.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected submit=202, got %d", submit.StatusCode)
+	}
+	var submitResp apiv1.SubmitBriefResponse
+	mustDecode(t, submit, &submitResp)
+
+	time.Sleep(20 * time.Millisecond)
+
+	eventResp := doJSON(t, http.MethodPost, ts.URL+"/v1/expert/events", map[string]any{
+		"specversion":     "1.0",
+		"id":              "evt_1",
+		"type":            "com.cova.expert.task.completed",
+		"source":          "expert://fi_cn_primary",
+		"time":            "2026-03-05T00:00:00Z",
+		"datacontenttype": "application/json",
+		"data": map[string]any{
+			"task_id": submitResp.JobId,
+			"job_id":  submitResp.JobId,
+			"status":  "succeeded",
+			"result": map[string]any{
+				"answer":           "done",
+				"confidence":       0.91,
+				"freshness_cutoff": "2026-03-05T00:00:00Z",
+			},
+		},
+	}, nil)
+	if eventResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected event=202, got %d", eventResp.StatusCode)
+	}
+	eventResp.Body.Close()
+
+	resultResp := doJSON(t, http.MethodGet, ts.URL+"/v1/assistant/jobs/"+submitResp.JobId+"/result", nil, nil)
+	if resultResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected result=200, got %d", resultResp.StatusCode)
+	}
+	var result apiv1.JobResultResponse
+	mustDecode(t, resultResp, &result)
+	if result.Result.Answer != "done" {
+		t.Fatalf("unexpected result answer: %s", result.Result.Answer)
+	}
+}
+
+func TestExpertEventRequiresValidSignatureWhenVerifierEnabled(t *testing.T) {
+	secret := "event-secret"
+	server := NewServer(
+		buildSnapshot(),
+		WithExecutor(acceptedExecutor{}),
+		WithExpertEventVerifier(deliverywebhook.NewVerifier(secret)),
+	)
+	t.Cleanup(server.Close)
+
+	mux := http.NewServeMux()
+	mux.Handle("/v1/expert/events", server.ExpertEventsHandler())
+	mux.Handle("/", server)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	submit := doJSON(t, http.MethodPost, ts.URL+"/v1/assistant/jobs", map[string]any{
+		"expert_id": "fi_cn_primary",
+		"date":      "2026-03-05",
+	}, nil)
+	if submit.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected submit=202, got %d", submit.StatusCode)
+	}
+	var submitResp apiv1.SubmitBriefResponse
+	mustDecode(t, submit, &submitResp)
+
+	body, err := json.Marshal(map[string]any{
+		"specversion":     "1.0",
+		"id":              "evt_signed_1",
+		"type":            "com.cova.expert.task.completed",
+		"source":          "expert://fi_cn_primary",
+		"time":            "2026-03-05T00:00:00Z",
+		"datacontenttype": "application/json",
+		"data": map[string]any{
+			"task_id": submitResp.JobId,
+			"job_id":  submitResp.JobId,
+			"status":  "succeeded",
+			"result": map[string]any{
+				"answer":           "done",
+				"confidence":       0.91,
+				"freshness_cutoff": "2026-03-05T00:00:00Z",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal event body: %v", err)
+	}
+
+	unsignedReq, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/expert/events", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build unsigned request: %v", err)
+	}
+	unsignedReq.Header.Set("Content-Type", "application/json")
+	unsignedResp, err := http.DefaultClient.Do(unsignedReq)
+	if err != nil {
+		t.Fatalf("send unsigned request: %v", err)
+	}
+	if unsignedResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unsigned event=401, got %d", unsignedResp.StatusCode)
+	}
+	unsignedResp.Body.Close()
+
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	signature := signEvent(secret, timestamp, body)
+	signedReq, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/expert/events", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build signed request: %v", err)
+	}
+	signedReq.Header.Set("Content-Type", "application/json")
+	signedReq.Header.Set("X-COVA-Timestamp", timestamp)
+	signedReq.Header.Set("X-COVA-Signature", "sha256="+signature)
+	signedResp, err := http.DefaultClient.Do(signedReq)
+	if err != nil {
+		t.Fatalf("send signed request: %v", err)
+	}
+	if signedResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected signed event=202, got %d", signedResp.StatusCode)
+	}
+	signedResp.Body.Close()
+}
+
 func buildSnapshot() *registry.Snapshot {
 	return &registry.Snapshot{
 		Experts: []registry.LoadedExpert{
@@ -404,3 +554,10 @@ func mustDecode(t *testing.T, resp *http.Response, target any) {
 	}
 }
 
+func signEvent(secret, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
