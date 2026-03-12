@@ -1,0 +1,10 @@
+api_version: cova/v1
+kind: AgentRegistry
+workspace: coco-cova-dev
+
+agents:
+  - agent_id: pm-001
+    name: "老王"
+    role: PM
+    agent_md: ../../agents/pm/agent.md
+    enabled: true
